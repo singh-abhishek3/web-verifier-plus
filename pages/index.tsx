@@ -1,7 +1,8 @@
 import type { NextPage } from 'next'
+import * as polyfill from 'credential-handler-polyfill'
 import styles from './index.module.css'
 import { Button } from 'components/Button/Button'
-import { useEffect, useState,  } from 'react'
+import { useEffect, useState  } from 'react'
 import { ScanModal } from 'components/ScanModal/ScanModal'
 import { CredentialCard } from 'components/CredentialCard/CredentialCard'
 import { Container } from 'components/Container/Container'
@@ -33,8 +34,13 @@ const Home: NextPage = () => {
   useEffect(() => {
     document.documentElement.lang = "en";
     document.title = "VerifierPlus Home page";
+
+    polyfill.loadOnce()
+      .then((_: any) => { console.log('CHAPI polyfill loaded.') })
+      .catch((e: any) => { console.error('Error loading CHAPI polyfill:', e) })
+
     const handlePopstate = () => {
-      if (window.location.hash === '/') {  
+      if (window.location.hash === '/') {
         setCredential(undefined);
         setWasMulti(false);
       } else {
@@ -56,8 +62,58 @@ const Home: NextPage = () => {
   useEffect(() => {
     if (file !== null) {
       const reader = new FileReader();
+      
       reader.onload = (e) => {
-        const text = e.target?.result as string ?? '';
+        let text = e.target?.result as string ?? '';
+        if(file.type == 'image/png'){
+          // Search for keyword and extract the object following it
+          const keyword = 'openbadgecredential';  
+          const keywordIndex = text.indexOf(keyword);
+
+          // Check if the keyword is found
+          if (keywordIndex !== -1) {
+            // Extract the portion of the string after the keyword
+            const startIndex = keywordIndex + keyword.length;
+
+            // Find start of the object
+            const objectStart = text.indexOf('{', startIndex);
+
+            if (objectStart !== -1) {
+              // Find matching closing brace
+              let braceCount = 0;
+              let objectEnd = objectStart;
+
+              while (objectEnd < text.length) {
+                if (text[objectEnd] === '{') {
+                  braceCount++;
+                } else if (text[objectEnd] === '}') {
+                  braceCount--;
+                }
+
+                // When brace count goes back to zero = found the end of object
+                if (braceCount === 0) {
+                  break;
+                }
+
+                objectEnd++;
+              }
+
+              // Slice string to capture the entire object (including braces)
+              const objectString = text.slice(objectStart, objectEnd + 1);
+
+              // Parse object
+              try {
+                const parsedObject = JSON.parse(objectString);
+                text = JSON.stringify(parsedObject, null, 2);
+              } catch (error) {
+                console.error('Failed to parse JSON:', error);
+              }
+            } 
+          } else {
+            console.log('Keyword not found');
+          }
+        }
+
         const result = verifyCredential(text);
         if (!result) {
           console.log('file parse error');
@@ -99,6 +155,42 @@ const Home: NextPage = () => {
     setIsOpen(!isOpen);
   }
 
+  async function requestVcOnClick() {
+    const credentialQuery = {
+      web: {
+        VerifiablePresentation: {
+          query: [
+            {
+              type: 'QueryByExample',
+              credentialQuery: {
+                reason: 'VerifierPlus is requesting any credential for verification.',
+                example: {
+                  type: ['VerifiableCredential']
+                }
+              }
+            }
+          ]
+        }
+      }
+    } as CredentialRequestOptions
+
+    const chapiResult = await navigator.credentials.get(credentialQuery) as any
+
+    if(!chapiResult?.data) {
+      console.log('no credentials received');
+    }
+
+    console.log(chapiResult);
+
+    const { data: vp } = chapiResult
+    // @ts-ignore
+    const vc = extractCredentialsFrom(vp)[0]
+
+    console.log('Extracted VC:', vc)
+
+    setCredential(vc)
+  }
+
   async function getJSONFromURL(url: string) {
     try {
       let response = await fetch(url);
@@ -132,8 +224,6 @@ const Home: NextPage = () => {
 
   async function onScan(json: string) : Promise<Boolean> {
     const fromqr = await credentialsFromQrText(json);
-    // console.log('here');
-    // console.log(fromqr);
     if (fromqr === null) { return false; }
     // get first cred. this will eventually need to be changed
     const cred = fromqr[0];
@@ -185,19 +275,14 @@ const Home: NextPage = () => {
         </div>
         <div>
           <p className={styles.descriptionBlock}>
-            VerifierPlus allows users to verify any <Link href='faq#supported'>supported</Link> digital academic credential.
+            VerifierPlus allows users to verify any <Link href='faq#supported'>supported</Link> digital academic
+            credential.
             This site is hosted by
-             the <a href='https://digitalcredentials.mit.edu/'>Digital Credentials Consortium</a>
-             , a network of leading international universities designing an open
-              infrastructure for digital academic credentials. <Link href='faq#trust'>Why trust us?</Link>
+            the <a href='https://digitalcredentials.mit.edu/'>Digital Credentials Consortium</a>
+            , a network of leading international universities designing an open
+            infrastructure for digital academic credentials. <Link href='faq#trust'>Why trust us?</Link>
           </p>
         </div>
-        <Button
-          icon={<span className="material-icons">qr_code_scanner</span>}
-          className={styles.scan}
-          text='Scan QR Code'
-          onClick={ScanButtonOnClick}
-        />
 
         {scanError && (
           <div className={styles.errorContainer}>
@@ -209,6 +294,15 @@ const Home: NextPage = () => {
             </p>
           </div>
         )}
+
+        <div>
+          <Button
+            icon={<span className="material-icons">wallet</span>}
+            className={styles.scan}
+            text='Request Credential from Wallet'
+            onClick={requestVcOnClick}
+          />
+        </div>
 
         <div className={styles.textAreaContainer}>
           <div className={styles.floatingTextarea}>
@@ -230,23 +324,34 @@ const Home: NextPage = () => {
               warning
             </span>
             <p className={styles.error}>
-              JSON cannot be parsed
+            The JSON is not a Verifiable Credential or an Open Badge 3.0
             </p>
           </div>
-      )}
+        )}
 
         <div
           className={styles.dndUpload}
           onDrop={handleFileDrop}
-          onDragOver={(e) => { e.preventDefault(); }}
-          >
-            <div className={styles.dndUploadText}>
-              Drag and drop a file here or <label className={styles.fileUpload}>
-                <input type='file' onChange={handleBrowse} />
-                <span className={styles.browseLink}>browse</span>
-              </label>
-            </div>
-            <span className={styles.supportText}>Supports JSON</span>
+          onDragOver={(e) => {
+            e.preventDefault();
+          }}
+        >
+          <div className={styles.dndUploadText}>
+            Drag and drop a file here or <label className={styles.fileUpload}>
+            <input type='file' onChange={handleBrowse}/>
+            <span className={styles.browseLink}>browse</span>
+          </label>
+          </div>
+          <span className={styles.supportText}>Supports JSON</span>
+        </div>
+
+        <div style={{marginTop: '1em'}}>
+          <Button
+            icon={<span className="material-icons">qr_code_scanner</span>}
+            className={styles.scan}
+            text='Scan QR Code'
+            onClick={ScanButtonOnClick}
+          />
         </div>
 
         {fileError && (
@@ -258,8 +363,8 @@ const Home: NextPage = () => {
               Json cannot be parsed
             </p>
           </div>
-      )}
-        <ScanModal isOpen={isOpen} setIsOpen={setIsOpen} onScan={onScan} setErrorMessage={setScanError} />
+        )}
+        <ScanModal isOpen={isOpen} setIsOpen={setIsOpen} onScan={onScan} setErrorMessage={setScanError}/>
       </div>
       <BottomBar isDark={isDark}/>
     </main>
